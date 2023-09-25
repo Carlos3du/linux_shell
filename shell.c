@@ -11,8 +11,8 @@
 //Definindo tamanho máximo dos comandos
 #define MAX_LEN 1000
 
-//Struct para armazenar os comandos que serão executados no shell
-typedef struct Command{ 
+//VARIAVEIS DE ARMAZENAMENTO
+typedef struct Command{ //Struct para armazenar os comandos inseridos
     char comando[MAX_LEN];
     struct Command *next;
 }Command;
@@ -49,12 +49,19 @@ void output_append_seq(char *command, char *filename);
 void output_write_seq(char *command, char *filename);
 void input_write_seq(char *program, char *input_f) ;
 
+//EXECUÇÃO EM BACKGROUND
+void remove_pid(int array[], int size, int index);
+
 //VARIÁVEIS GLOBAIS
-char last_cmd[MAX_LEN]; //variavel pra armazenar o ultimo comando armazenado
 int style = 0; //0 = seq, 1 = par
 int type = 0; //0 = int //1 = batch_file
 int exit_flag = 0; //flag para sinalizar a saída do programa
+char last_cmd[MAX_LEN]; //variavel pra armazenar o ultimo comando armazenado
 int pipe_file[2]; //variável para armazenar a entrada e saída do pipe
+int goto_back = 0;
+int back_count = 1;
+pid_t back_pids[MAX_LEN];
+
 
 /*
     FUNÇÃO MAIN QUE CHAMA OUTRAS FUNÇÕES PARA EXECUTAR OS PROCESSOS E THREADS
@@ -240,6 +247,9 @@ void exec_command(char *cmd){ //executando os comandos no modo sequencial ou em 
     if(strcmp(cmd, "exit") == 0){
         exit(0);
     }
+    else if(strstr(cmd, "fg") != NULL){
+        exit(0);
+    }
     
     //Divide a entrada em tokens usando espaço 
     char *token = strtok(cmd, " ");
@@ -253,6 +263,7 @@ void exec_command(char *cmd){ //executando os comandos no modo sequencial ou em 
     args[arg_count] = NULL; //Coloca NULL no final do array de argumentos
 
     //Executa o comando usando seus argumentos
+    
     execvp(args[0], args);  
     perror("Comando invalido - erro");
 }
@@ -264,20 +275,29 @@ void sequential_exec(Command **head, Command **tail){//Executando sequencialment
 
     while(aux != NULL){
         child_pid = fork(); //criando processo filho
-     
+        
         if(child_pid == 0){ //processo filho  
+            if(strchr(aux->comando, '&') != NULL){
+                char *token = strrchr(aux->comando, '&');
+                if (token != NULL) {
+                    *token = '\0';
+                }
+            }
+            
             if(type == 1){
                 printf("%s\n", aux->comando);//printando o comando antes de executa-lo
                 sleep(1);
             }
             if(strchr(aux->comando, '|') != NULL) { //executar os comandos em pipe
+                
                 char *cmd1 = strtok(aux->comando, "|");
                 char *cmd2 = strtok(NULL, "|");
 
                 remove_spaces(cmd1);
                 remove_spaces(cmd2);
-                                       
+                
                 pipe_commands_seq(cmd1, cmd2);
+                
             }
             else if(strstr(aux->comando, ">>") != NULL){//Output com Apend em um arquivo (>>) 
           
@@ -311,8 +331,10 @@ void sequential_exec(Command **head, Command **tail){//Executando sequencialment
                 exit(0);
             }
             else{//executando da maneira padrão
+
                 remove_spaces(aux->comando);
                 exec_command(aux->comando);
+            
                 exit(0);
             }
         } 
@@ -323,13 +345,39 @@ void sequential_exec(Command **head, Command **tail){//Executando sequencialment
             if(strstr(aux->comando, "exit") != NULL){
                 sleep(1);
                 exit(0);
+                
             }
-            else{
-                waitpid(child_pid, &child_status, 0);
-            }
+            else{ 
+                if(strchr(aux->comando, '&') != NULL){ //caso tenha sido posto em background
+                    back_pids[back_count] = child_pid;
+                    printf("[%d] %d\n", back_count,back_pids[back_count]);
+                    back_count++;
+                }
+                else if (strstr(aux->comando, "fg") != NULL){  //tirando o comando do background
+                    char *pid = strtok(aux->comando, " ");
+                    pid = strtok(NULL, " ");
+
+                    int pid_int = atoi(pid);
+
+                    if (pid_int > back_count){
+                        perror("Index maior do que existente - erro");
+                    }
+                    else{
+                        if(kill(back_pids[pid_int], SIGINT) != 0){
+                            perror("O processo nao existe / ja foi finalizado - erro");
+                        }
+                        else{
+                            remove_pid(back_pids, back_count, pid_int);
+                            back_count--;
+                        }
+                    }
+                }
+                
+                sleep(1);
+                waitpid(child_pid, &child_status, 0);  
+            }            
             aux = aux->next; 
-        }
-        
+        }   
     }
 
     while(*head != NULL){ //limpando os comandos depois de executar todas as threads
@@ -338,6 +386,13 @@ void sequential_exec(Command **head, Command **tail){//Executando sequencialment
         free(temp);
     }
     *tail = NULL;
+}
+
+void remove_pid(int array[], int size, int index){ //remover o pid do array dos comandos em background
+    for(int i = index + 1; i < size; i++){
+    array[i - 1] = array[i];
+    }
+    size--;
 }
 
 void pipe_commands_seq(char *cmd1, char *cmd2){//executando os comandos no modo pipe, no estilo sequencial
@@ -354,6 +409,7 @@ void pipe_commands_seq(char *cmd1, char *cmd2){//executando os comandos no modo 
         perror("Criacao processo pipe - erro");
     }
     else if(pipe_pid == 0){  //processo neto
+        
         close(pipefd[1]); //fecha a extremidade de escrita do pipe
 
         //redireciona a entrada do cmd1 pra a leitura do pipe 
@@ -361,21 +417,20 @@ void pipe_commands_seq(char *cmd1, char *cmd2){//executando os comandos no modo 
         close(pipefd[0]);  //fechando a extremidade de leitra do pipe
 
         exec_command(cmd2);
-
         perror("Pipe cmd 2 -erro"); 
-
         exit(1);
     } 
     else{ //processo filho
+    
         close(pipefd[0]); 
        
         dup2(pipefd[1], STDOUT_FILENO); //lê a entrada do cmd1 pra executa no cmd2
         close(pipefd[1]);  //Fecha a extremidade de escrita do pipe
- 
+        
         exec_command(cmd1);
-
         perror("Pipe cmd 1 -erro");
         exit(1);
+        
     }
 }
 
@@ -464,6 +519,33 @@ void input_write_seq(char *program, char *input_f){//Input vindo de um arquivo, 
 void *read_cmd(void *command){ //tratando o ponteiro void e executando o comando no sistema de maneira paralela
     char *read = (char *)command;
 
+    if(strchr(command, '&') != NULL){ //adicionando thread no modo background 
+        pthread_t tid = pthread_self();
+
+        back_pids[back_count] = tid;
+        printf("[%d] %lu\n", back_count, tid);
+        back_count++;
+    }
+    else if(strstr(command, "fg") != NULL){  //tirando o comando do background
+        char *tid = strtok(command, " ");
+        tid = strtok(NULL, " ");
+
+        int tid_int = atoi(tid);
+
+        if (tid_int > back_count){
+            perror("Index maior do que existente - erro");
+        }
+        else{
+            if(pthread_cancel(back_pids[tid_int]) != 0){
+                perror("O processo nao existe / ja foi finalizado - erro");
+            }
+            else{
+                remove_pid(back_pids, back_count, tid_int);
+                back_count--;
+            }
+        }
+    }
+
     if(strcmp(read, "exit") == 0){
         exit_flag = 1;
         pthread_exit(NULL);
@@ -510,7 +592,7 @@ void *read_cmd(void *command){ //tratando o ponteiro void e executando o comando
         }
         pthread_exit(NULL);
     }
-    return NULL;
+    //return NULL;
 }
 
 void parallel_exec(Command **head, Command **tail){//executar em paralelo os comandos, em forma de threads
@@ -534,6 +616,7 @@ void parallel_exec(Command **head, Command **tail){//executar em paralelo os com
                     perror("Criacao da thread - erro");
                     break;
                 }
+
                 count++; //Contando o número total de threads
                 
                 threads = (pthread_t *)realloc(threads, (count + 1) * sizeof(pthread_t));//realocando o espaço de memoria das threads 
@@ -554,6 +637,7 @@ void parallel_exec(Command **head, Command **tail){//executar em paralelo os com
             if(pthread_join(threads[i], NULL) != 0){ //finalizando todas as threads depois de executa-llas em uma ordem aleatória
                 perror("Espera por threads - erro");  
             }
+            
         }
 
         exit(0);
@@ -563,6 +647,7 @@ void parallel_exec(Command **head, Command **tail){//executar em paralelo os com
     }
     else{     
         waitpid(child_pid, &child_status, 0);
+        sleep(1);
     }
 
     Command* temp;
@@ -723,6 +808,7 @@ void *input_write_par(void *program, void *input_f){//Usar um arquivo como input
         pthread_exit(NULL);
     }
 }
+
 
 
 
