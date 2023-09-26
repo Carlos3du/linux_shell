@@ -244,7 +244,7 @@ void exec_command(char *cmd){ //executando os comandos no modo sequencial ou em 
     char *args[MAX_LEN]; //Array de argumentos + o NULL no final
     int arg_count = 0;
 
-    if(strcmp(cmd, "exit") == 0){
+    if(strstr(cmd, "exit") != NULL){
         exit(0);
     }
     else if(strstr(cmd, "fg") != NULL){
